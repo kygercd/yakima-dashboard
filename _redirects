@@ -1,0 +1,6 @@
+# Netlify proxy redirects — forwards /api/* to upstream sources.
+# Netlify proxies these server-side, so the browser never sees a CORS request.
+# Query strings are forwarded automatically.
+
+/api/usbr   https://www.usbr.gov/pn-bin/instant.pl                       200
+/api/nwrfc  https://www.nwrfc.noaa.gov/station/flowplot/textPlot.cgi      200

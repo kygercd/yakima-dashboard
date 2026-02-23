@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="Real-time streamflow and weather dashboard for the Yakima River Basin" />
+  <title>Yakima Basin · Hydrologic Dashboard</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<div class="app">
+
+  <!-- HEADER -->
+  <header class="header">
+    <div class="header-brand">
+      <svg class="brand-icon" viewBox="0 0 32 32" fill="none" aria-hidden="true">
+        <path d="M16 4C16 4 6 13 6 20a10 10 0 0 0 20 0C26 13 16 4 16 4z" fill="url(#wg)" opacity="0.9"/>
+        <path d="M11 21c1 2 3 3 5 3" stroke="#7dcfff" stroke-width="1.5" stroke-linecap="round"/>
+        <defs>
+          <linearGradient id="wg" x1="16" y1="4" x2="16" y2="30" gradientUnits="userSpaceOnUse">
+            <stop offset="0%" stop-color="#7aa2f7"/>
+            <stop offset="100%" stop-color="#7dcfff"/>
+          </linearGradient>
+        </defs>
+      </svg>
+      <div class="brand-text">
+        <span class="brand-title">Yakima River Basin</span>
+        <span class="brand-sub">Hydrologic Dashboard</span>
+      </div>
+    </div>
+
+    <div class="header-controls">
+      <div id="alert-pill" class="alert-pill hidden">
+        <span class="alert-dot"></span>
+        <span id="alert-text">Flood Advisory</span>
+      </div>
+
+      <div class="time-range-group" role="group" aria-label="Time range">
+        <button class="range-btn" data-days="1">24H</button>
+        <button class="range-btn" data-days="3">3D</button>
+        <button class="range-btn active" data-days="7">7D</button>
+        <button class="range-btn" data-days="14">14D</button>
+      </div>
+
+      <div class="status-row">
+        <span class="status-dot" id="status-dot" title="Data status"></span>
+        <span class="status-label" id="status-label">Loading…</span>
+      </div>
+
+      <button class="refresh-btn" id="refresh-btn" title="Refresh data now" aria-label="Refresh">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
+          <path d="M23 4v6h-6"/>
+          <path d="M1 20v-6h6"/>
+          <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+        </svg>
+      </button>
+    </div>
+  </header>
+
+  <main>
+
+    <!-- MAP -->
+    <section class="map-section" aria-label="Basin map">
+      <div id="map"></div>
+    </section>
+
+    <!-- STREAM CONDITIONS -->
+    <section class="content-section">
+      <div class="section-header">
+        <div class="section-title-group">
+          <svg class="section-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+            <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+          </svg>
+          <h2 class="section-title">Stream Conditions</h2>
+        </div>
+        <div class="section-sources">
+          <span class="source-tag usgs">USGS NWIS</span>
+          <span class="source-tag usbr">USBR Hydromet</span>
+        </div>
+      </div>
+      <div class="stations-grid" id="stations-grid">
+        <!-- Injected by app.js -->
+      </div>
+    </section>
+
+    <!-- WINDY WEATHER MAP -->
+    <section class="content-section windy-section">
+      <div class="section-header">
+        <div class="section-title-group">
+          <svg class="section-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+            <path d="M9.59 4.59A2 2 0 1 1 11 8H2m10.59 11.41A2 2 0 1 0 14 16H2m15.73-8.27A2.5 2.5 0 1 1 19.5 12H2"/>
+          </svg>
+          <h2 class="section-title">Basin Weather</h2>
+        </div>
+        <div class="windy-overlay-btns" id="windy-overlay-btns">
+          <button class="windy-btn active" data-overlay="rain">Precip</button>
+          <button class="windy-btn" data-overlay="snowcover">Snow Cover</button>
+          <button class="windy-btn" data-overlay="wind">Wind</button>
+          <button class="windy-btn" data-overlay="temp">Temp</button>
+        </div>
+      </div>
+      <div class="windy-embed-wrap">
+        <iframe id="windy-iframe"
+          src="https://embed.windy.com/embed2.html?lat=47.1&amp;lon=-120.9&amp;detailLat=47.1&amp;detailLon=-120.9&amp;zoom=8&amp;level=surface&amp;overlay=rain&amp;product=ecmwf&amp;menu=&amp;message=true&amp;marker=true&amp;calendar=now&amp;pressure=&amp;type=map&amp;location=coordinates&amp;detail=true&amp;metricWind=mph&amp;metricTemp=%C2%B0F&amp;radarRange=-1"
+          frameborder="0"
+          title="Windy weather map — Yakima Basin"
+          allowfullscreen>
+        </iframe>
+      </div>
+    </section>
+
+    <!-- WEATHER CONDITIONS -->
+    <section class="content-section">
+      <div class="section-header">
+        <div class="section-title-group">
+          <svg class="section-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+            <path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9z"/>
+          </svg>
+          <h2 class="section-title">Weather &amp; Forecast</h2>
+        </div>
+        <div class="section-sources">
+          <span class="source-tag openmeteo">Open-Meteo</span>
+          <span class="source-tag nws">NWS</span>
+        </div>
+      </div>
+      <div class="weather-grid" id="weather-grid">
+        <!-- Injected by app.js -->
+      </div>
+    </section>
+
+  </main>
+
+  <!-- FOOTER -->
+  <footer class="footer">
+    <div class="footer-sources">
+      Data:
+      <a href="https://waterservices.usgs.gov" target="_blank" rel="noopener">USGS NWIS</a>
+      &middot;
+      <a href="https://www.usbr.gov/pn/hydromet/" target="_blank" rel="noopener">USBR Hydromet</a>
+      &middot;
+      <a href="https://open-meteo.com" target="_blank" rel="noopener">Open-Meteo</a>
+      &middot;
+      <a href="https://www.windy.com" target="_blank" rel="noopener">Windy</a>
+      &middot;
+      <a href="https://www.nwrfc.noaa.gov" target="_blank" rel="noopener">NWRFC</a>
+      &middot;
+      <a href="https://api.weather.gov" target="_blank" rel="noopener">NWS</a>
+    </div>
+    <div class="footer-note">Auto-refreshes every 15 minutes</div>
+  </footer>
+
+</div><!-- .app -->
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
