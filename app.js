@@ -13,6 +13,7 @@ const STATIONS = [
     shortName: 'Easton',
     usgsId:    null,         // no active IV gauge; USBR is primary
     usbrId:    'EASW',       // confirmed live via API
+    nwsLid:    'EASW1',     // NWS/NWRFC — forecast
     lat: 47.2457, lng: -121.1859,
     color: '#7aa2f7',
   },
@@ -22,6 +23,7 @@ const STATIONS = [
     shortName: 'CLE Reservoir',
     usgsId:    null,         // no active IV gauge; USBR is primary
     usbrId:    'CLE',        // confirmed live via API
+    nwsLid:    'CLEW1',     // NWS/NWRFC — forecast
     lat: 47.2318, lng: -121.0604,
     color: '#9d7cd8',
   },
@@ -31,6 +33,7 @@ const STATIONS = [
     shortName: 'Yakima @ Cle Elum',
     usgsId:    null,         // no active IV gauge; USBR is primary
     usbrId:    'YUMW',       // confirmed live via API
+    nwsLid:    'YUMW1',     // NWS/NWRFC — forecast
     lat: 47.1954, lng: -120.9363,
     color: '#7dcfff',
   },
@@ -40,6 +43,7 @@ const STATIONS = [
     shortName: 'Teanaway',
     usgsId:    null,         // no active IV gauge; USBR is primary
     usbrId:    'TNAW',       // confirmed live via API
+    nwsLid:    'TNAW1',     // NWS/NWRFC — forecast
     lat: 47.2582, lng: -120.8617,
     color: '#9ece6a',
   },
@@ -50,6 +54,7 @@ const STATIONS = [
     usgsId:    null,         // no USGS gauge — USBR primary
     usbrId:    'YRWW',       // confirmed live via API
     nwrfcId:   'HLKW1',     // NWRFC — provides water temperature data
+    nwsLid:    'HLKW1',     // NWS/NWRFC — forecast
     lat: 47.0382, lng: -120.7221,
     color: '#e0af68',
   },
@@ -59,6 +64,7 @@ const STATIONS = [
     shortName: 'Umtanum',
     usgsId:    '12484500',   // confirmed active USGS IV gauge
     usbrId:    'UMTW',       // confirmed live via API
+    nwsLid:    'UMTW1',     // NWS/NWRFC — forecast
     lat: 46.8615, lng: -120.4715,
     color: '#f7768e',
   },
@@ -409,6 +415,32 @@ async function fetchNWSAlerts() {
 }
 
 // =====================================================================
+// API: NWS WATER — River Forecast
+// Endpoint has Access-Control-Allow-Origin: * — no proxy needed.
+// Returns flow in kcfs; multiply by 1000 for cfs.
+// =====================================================================
+
+async function fetchNWSForecast(lid) {
+  const ctrl  = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 10000);
+  try {
+    const res = await fetch(
+      `https://api.water.noaa.gov/nwps/v1/gauges/${lid}/stageflow`,
+      { signal: ctrl.signal },
+    );
+    clearTimeout(timer);
+    if (!res.ok) throw new Error(`NWS forecast ${lid}: HTTP ${res.status}`);
+    const json = await res.json();
+    return (json?.forecast?.data ?? [])
+      .filter(d => d.secondary != null)
+      .map(d => ({ time: new Date(d.validTime), value: Math.round(d.secondary * 1000) }))
+      .filter(d => !isNaN(d.time.getTime()) && d.value >= 0);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// =====================================================================
 // MAP — Leaflet
 // =====================================================================
 
@@ -504,6 +536,7 @@ function createHydrograph(canvasEl, stationData, station) {
 
   const discharge = (stationData?.discharge ?? []).sort((a, b) => a.time - b.time);
   const waterTemp = stationData?.waterTemp ?? [];
+  const rawFcast  = (stationData?.forecast  ?? []).sort((a, b) => a.time - b.time);
 
   if (discharge.length === 0) {
     const ctx = canvasEl.getContext('2d');
@@ -515,26 +548,61 @@ function createHydrograph(canvasEl, stationData, station) {
     return null;
   }
 
-  // Downsample — target ~80 points so chart stays crisp
-  const ds     = downsample(discharge, 80);
-  const labels = ds.map(v => fmtDateLabel(v.time));
-  const qData  = ds.map(v => v.value);
+  // Downsample observed — target ~80 points so chart stays crisp
+  const ds        = downsample(discharge, 80);
+  const lastObsTs = ds.length ? ds[ds.length - 1].time.getTime() : 0;
 
-  // Align temperature to downsampled discharge timestamps
+  // Forecast: only future points, keeping the connector at the last observed value
+  const futureFcast = rawFcast.filter(d => d.time.getTime() > lastObsTs);
+
+  // Build unified label/index arrays
+  // observed labels + forecast labels (day+hour for 6h-interval forecast)
+  const fmtFcastLabel = d => {
+    const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    const h   = d.getHours();
+    const ampm = h === 0 ? '12a' : h < 12 ? `${h}a` : h === 12 ? '12p' : `${h - 12}p`;
+    return `${months[d.getMonth()]} ${d.getDate()} ${ampm}`;
+  };
+
+  const obsLabels   = ds.map(v => fmtDateLabel(v.time));
+  const fcastLabels = futureFcast.map(v => fmtFcastLabel(v.time));
+  const labels      = [...obsLabels, ...fcastLabels];
+
+  const obsCount   = ds.length;
+  const fcastCount = futureFcast.length;
+
+  // Observed discharge: real values + nulls for forecast slots
+  const qObsData = [
+    ...ds.map(v => v.value),
+    ...Array(fcastCount).fill(null),
+  ];
+
+  // Forecast discharge: null for observed slots + connector at boundary + forecast values
+  const qFcastData = [
+    ...Array(obsCount - 1).fill(null),
+    obsCount > 0 ? ds[obsCount - 1].value : null, // connector
+    ...futureFcast.map(v => v.value),
+  ];
+
+  // Align temperature to observed timestamps only (no temp in forecast)
   let tData = null;
   if (waterTemp.length > 0) {
     const sortedT = [...waterTemp].sort((a, b) => a.time - b.time);
-    tData = ds.map(dp => {
+    const aligned = ds.map(dp => {
       const nearest = sortedT.reduce((best, tv) =>
         Math.abs(tv.time - dp.time) < Math.abs(best.time - dp.time) ? tv : best
       );
       return Math.abs(nearest.time - dp.time) < 4 * 3600000 ? nearest.value : null;
     });
+    tData = [...aligned, ...Array(fcastCount).fill(null)];
   }
+
+  const hasForecast = fcastCount > 0;
+  const fcastColor  = station.color + '99'; // 60% opacity
 
   const datasets = [{
     label:            'Discharge (cfs)',
-    data:             qData,
+    data:             qObsData,
     borderColor:      station.color,
     backgroundColor:  makeGradientPlugin(station.color),
     borderWidth:      2,
@@ -545,6 +613,24 @@ function createHydrograph(canvasEl, stationData, station) {
     fill:             true,
     yAxisID:          'y',
   }];
+
+  if (hasForecast) {
+    datasets.push({
+      label:            'Forecast (cfs)',
+      data:             qFcastData,
+      borderColor:      fcastColor,
+      backgroundColor:  'transparent',
+      borderWidth:      1.5,
+      borderDash:       [6, 4],
+      pointRadius:      0,
+      pointHoverRadius: 4,
+      pointHoverBackgroundColor: fcastColor,
+      tension:          0.35,
+      fill:             false,
+      spanGaps:         false,
+      yAxisID:          'y',
+    });
+  }
 
   if (tData) {
     datasets.push({
@@ -590,8 +676,10 @@ function createHydrograph(canvasEl, stationData, station) {
           bodyColor:       '#a9b1d6',
           padding:         10,
           cornerRadius:    6,
+          filter:          item => item.parsed.y != null,
           callbacks: {
             label: ctx => {
+              if (ctx.dataset.label.includes('Forecast'))  return ` Fcst: ${fmtCfs(ctx.parsed.y)} cfs`;
               if (ctx.dataset.label.includes('Discharge')) return ` ${fmtCfs(ctx.parsed.y)} cfs`;
               return ` ${ctx.parsed.y != null ? ctx.parsed.y.toFixed(1) : '\u2014'}\u00b0F`;
             },
@@ -601,7 +689,7 @@ function createHydrograph(canvasEl, stationData, station) {
       scales: {
         x: {
           grid:   { color: 'rgba(41,53,90,0.35)', drawTicks: false },
-          ticks:  { color: '#565f89', maxTicksLimit: 6, maxRotation: 0, font: { size: 10 } },
+          ticks:  { color: '#565f89', maxTicksLimit: 7, maxRotation: 0, font: { size: 10 } },
           border: { color: '#29355a' },
         },
         y: {
@@ -985,7 +1073,21 @@ async function refresh() {
         }
       }
 
-      state.stationData[station.id] = { ...(result ?? { discharge: [], waterTemp: [], gageHeight: [] }), source };
+      // Fetch NWS river forecast in parallel with observed data (CORS-enabled)
+      let forecast = [];
+      if (station.nwsLid) {
+        try {
+          forecast = await fetchNWSForecast(station.nwsLid);
+        } catch (err) {
+          console.warn(`[NWS forecast ${station.nwsLid}] ${err.message}`);
+        }
+      }
+
+      state.stationData[station.id] = {
+        ...(result ?? { discharge: [], waterTemp: [], gageHeight: [] }),
+        forecast,
+        source,
+      };
       renderStationCard(station, state.stationData[station.id]);
     });
 
@@ -1038,7 +1140,7 @@ function initWindyOverlays() {
 
   function windyUrl(overlay) {
     return 'https://embed.windy.com/embed2.html' +
-      '?lat=47.1&lon=-120.9&detailLat=47.1&detailLon=-120.9' +
+      '?lat=46.862&lon=-120.472&detailLat=46.862&detailLon=-120.472' +
       '&zoom=8&level=surface&overlay=' + overlay +
       '&product=ecmwf&menu=&message=true&marker=true&calendar=now' +
       '&pressure=&type=map&location=coordinates&detail=true' +
