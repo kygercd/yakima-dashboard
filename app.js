@@ -77,7 +77,6 @@ const WEATHER_LOCATIONS = [
 ];
 
 const REFRESH_MS = 15 * 60 * 1000;  // 15 minutes
-const WINDY_KEY  = 'hjtFORvuVtca8zU8Skqo2xLzElceR8SY';
 
 // =====================================================================
 // STATE
@@ -88,7 +87,7 @@ const state = {
   isRefreshing: false,
   lastRefresh:  null,
   stationData:  {},   // { id: {discharge, waterTemp, gageHeight, source} }
-  weatherData:  {},   // { name: parseWindyResponse output }
+  weatherData:  {},   // { name: open-meteo json }
   charts:       {},   // { stationId | 'wx_'+name: Chart }
   map:          null,
   markers:      {},   // { stationId: L.circleMarker }
@@ -363,115 +362,31 @@ function parseNWRFCTempHTML(html, days) {
 }
 
 // =====================================================================
-// API: WEATHER — Windy Point Forecast v2 (GFS model)
-// Docs: https://api.windy.com/point-forecast/docs
-// CORS: dynamic origin reflection — no proxy needed.
-// Response: 80 points at 3h intervals (~10 days).
-//   temp-surface:         Kelvin
-//   past3hprecip-surface: metres
-//   wind_u/v-surface:     m/s (vector components)
-//   gust-surface:         m/s
-//   rh-surface:           %
+// API: WEATHER — Open-Meteo (free, no key required)
+// Docs: https://open-meteo.com/en/docs
 // =====================================================================
 
-async function fetchWindy(lat, lng) {
-  const ctrl  = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 15000);
-  try {
-    const res = await fetch('https://api.windy.com/api/point-forecast/v2', {
-      method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({
-        lat,
-        lon:        lng,
-        model:      'gfs',
-        parameters: ['temp', 'past3hprecip', 'wind', 'windGust', 'rh'],
-        levels:     ['surface'],
-        key:        WINDY_KEY,
-      }),
-      signal: ctrl.signal,
-    });
-    clearTimeout(timer);
-    if (!res.ok) throw new Error(`Windy API: HTTP ${res.status}`);
-    return parseWindyResponse(await res.json());
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-function parseWindyResponse(raw) {
-  const ts     = raw.ts ?? [];                        // ms UTC timestamps
-  const tempK  = raw['temp-surface']          ?? [];
-  const precM  = raw['past3hprecip-surface']  ?? [];
-  const windU  = raw['wind_u-surface']        ?? [];
-  const windV  = raw['wind_v-surface']        ?? [];
-  const gustMs = raw['gust-surface']          ?? [];
-  const rh     = raw['rh-surface']            ?? [];
-
-  const kToF    = k  => (k  - 273.15) * 9 / 5 + 32;
-  const mToIn   = m  => m  * 39.3701;
-  const msToMph = ms => ms * 2.23694;
-  const speed   = (u, v) => Math.sqrt((u ?? 0) * (u ?? 0) + (v ?? 0) * (v ?? 0));
-  const windChill = (t, v) => (t <= 50 && v >= 3)
-    ? 35.74 + 0.6215 * t - 35.75 * Math.pow(v, 0.16) + 0.4275 * t * Math.pow(v, 0.16)
-    : t;
-
-  // Current: latest point whose timestamp is ≤ now
-  const now = Date.now();
-  let curIdx = 0;
-  for (let i = 0; i < ts.length; i++) { if (ts[i] <= now) curIdx = i; }
-
-  const curTempF    = kToF(tempK[curIdx] ?? 273.15);
-  const curWindMph  = msToMph(speed(windU[curIdx], windV[curIdx]));
-  const curGustMph  = msToMph(gustMs[curIdx] ?? 0);
-  const curRh       = rh[curIdx] ?? 0;
-  const curPrec3h   = mToIn(precM[curIdx] ?? 0);
-
-  const current = {
-    temp:      curTempF,
-    feelsLike: windChill(curTempF, curWindMph),
-    windSpeed: curWindMph,
-    gust:      curGustMph,
-    humidity:  curRh,
-    precip3h:  curPrec3h,
-  };
-
-  // Daily aggregation — group points by Pacific-time calendar date
-  const months  = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-  const dayMap  = new Map();   // 'YYYY-MM-DD' → { label, temps:[], precips:[] }
-  for (let i = 0; i < ts.length; i++) {
-    const key = new Date(ts[i]).toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
-    if (!dayMap.has(key)) {
-      const [, mo, dy] = key.split('-').map(Number);
-      dayMap.set(key, { label: `${months[mo - 1]} ${dy}`, temps: [], precips: [] });
-    }
-    dayMap.get(key).temps.push(kToF(tempK[i] ?? 273.15));
-    dayMap.get(key).precips.push(mToIn(precM[i] ?? 0));
-  }
-
-  const daily = Array.from(dayMap.entries())
-    .sort(([a], [b]) => a.localeCompare(b))
-    .slice(0, 7)
-    .map(([, v]) => ({
-      label:  v.label,
-      high:   Math.max(...v.temps),
-      low:    Math.min(...v.temps),
-      precip: v.precips.reduce((s, p) => s + p, 0),
-    }));
-
-  return { current, daily };
-}
-
-/** Derive a simple condition from temp + precip + RH (no WMO code in Windy response). */
-function windyCondition(tempF, precip3hIn, rhPct) {
-  if (precip3hIn > 0.01) {
-    if (tempF <= 32) return { emoji: '\u2744', desc: 'Snow' };
-    if (tempF <= 36) return { emoji: '\ud83c\udf28', desc: 'Wintry mix' };
-    return { emoji: '\ud83c\udf27', desc: 'Rain' };
-  }
-  if (rhPct > 88) return { emoji: '\u2601', desc: 'Overcast' };
-  if (rhPct > 68) return { emoji: '\u26c5', desc: 'Partly cloudy' };
-  return { emoji: '\u2600', desc: 'Clear' };
+async function fetchWeather(lat, lng) {
+  const params = new URLSearchParams({
+    latitude:  lat,
+    longitude: lng,
+    current:   [
+      'temperature_2m', 'apparent_temperature', 'precipitation',
+      'wind_speed_10m', 'weather_code', 'relative_humidity_2m',
+    ].join(','),
+    daily: [
+      'temperature_2m_max', 'temperature_2m_min',
+      'precipitation_sum', 'precipitation_probability_max', 'weather_code',
+    ].join(','),
+    temperature_unit:  'fahrenheit',
+    wind_speed_unit:   'mph',
+    precipitation_unit: 'inch',
+    timezone:          'America/Los_Angeles',
+    forecast_days:     '7',
+  });
+  const res = await fetch(`https://api.open-meteo.com/v1/forecast?${params}`);
+  if (!res.ok) throw new Error(`Open-Meteo: HTTP ${res.status}`);
+  return await res.json();
 }
 
 // =====================================================================
@@ -795,13 +710,13 @@ function createWeatherChart(canvasEl, daily, locationKey) {
   const key = 'wx_' + locationKey;
   const existing = state.charts[key];
   if (existing) { try { existing.destroy(); } catch (_) {} }
-  if (!daily || daily.length === 0) return null;
+  if (!daily) return null;
 
-  // daily is now an array of { label, high, low, precip } from parseWindyResponse
-  const labels  = daily.map(d => d.label);
-  const highs   = daily.map(d => Math.round(d.high));
-  const lows    = daily.map(d => Math.round(d.low));
-  const precips = daily.map(d => parseFloat(d.precip.toFixed(2)));
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const labels = daily.time.map(t => {
+    const d = new Date(t + 'T12:00:00');
+    return `${months[d.getMonth()]} ${d.getDate()}`;
+  });
 
   const chart = new Chart(canvasEl.getContext('2d'), {
     type: 'bar',
@@ -810,7 +725,7 @@ function createWeatherChart(canvasEl, daily, locationKey) {
       datasets: [
         {
           label:           'High \u00b0F',
-          data:            highs,
+          data:            daily.temperature_2m_max,
           backgroundColor: 'rgba(224,175,104,0.65)',
           borderColor:     '#e0af68',
           borderWidth:     1,
@@ -820,7 +735,7 @@ function createWeatherChart(canvasEl, daily, locationKey) {
         },
         {
           label:           'Low \u00b0F',
-          data:            lows,
+          data:            daily.temperature_2m_min,
           backgroundColor: 'rgba(122,162,247,0.45)',
           borderColor:     '#7aa2f7',
           borderWidth:     1,
@@ -830,8 +745,8 @@ function createWeatherChart(canvasEl, daily, locationKey) {
         },
         {
           type:            'line',
-          label:           'Precip (in)',
-          data:            precips,
+          label:           'Precip %',
+          data:            daily.precipitation_probability_max,
           borderColor:     'rgba(125,207,255,0.7)',
           backgroundColor: 'rgba(125,207,255,0.08)',
           borderWidth:     1.5,
@@ -859,11 +774,6 @@ function createWeatherChart(canvasEl, daily, locationKey) {
           bodyColor:       '#a9b1d6',
           padding:         10,
           cornerRadius:    6,
-          callbacks: {
-            label: ctx => ctx.dataset.label.includes('Precip')
-              ? ` ${ctx.parsed.y.toFixed(2)}"`
-              : ` ${ctx.parsed.y}\u00b0F`,
-          },
         },
       },
       scales: {
@@ -873,18 +783,18 @@ function createWeatherChart(canvasEl, daily, locationKey) {
           border: { color: '#29355a' },
         },
         y: {
-          grid:   { color: 'rgba(41,53,90,0.3)' },
-          ticks:  { color: '#565f89', font: { size: 9 }, maxTicksLimit: 4,
-                    callback: v => v + '\u00b0' },
-          border: { color: '#29355a' },
+          grid:     { color: 'rgba(41,53,90,0.3)' },
+          ticks:    { color: '#565f89', font: { size: 9 }, maxTicksLimit: 4,
+                      callback: v => v + '\u00b0' },
+          border:   { color: '#29355a' },
         },
         y1: {
           position: 'right',
-          min:    0,
-          grid:   { drawOnChartArea: false },
-          ticks:  { color: 'rgba(125,207,255,0.4)', font: { size: 9 }, maxTicksLimit: 3,
-                    callback: v => v + '"' },
-          border: { color: 'transparent' },
+          min: 0, max: 100,
+          grid:     { drawOnChartArea: false },
+          ticks:    { color: 'rgba(125,207,255,0.4)', font: { size: 9 }, maxTicksLimit: 3,
+                      callback: v => v + '%' },
+          border:   { color: 'transparent' },
         },
       },
     },
@@ -1042,47 +952,45 @@ function renderWeatherCard(loc, data) {
     return;
   }
 
-  const cur      = data.current;
-  const daily    = data.daily;
-  const cond     = windyCondition(cur.temp, cur.precip3h, cur.humidity);
+  const cur    = data.current;
+  const daily  = data.daily;
+  const emoji  = wmoToEmojiSafe(cur.weather_code);
+  const desc   = wmoToDesc(cur.weather_code);
   const canvasId = `wxchart-${loc.name.replace(/\s+/g, '_')}`;
 
-  const tmwHigh = daily?.[1]?.high  != null ? Math.round(daily[1].high)  + '\u00b0' : '\u2014';
-  const tmwLow  = daily?.[1]?.low   != null ? Math.round(daily[1].low)   + '\u00b0' : '\u2014';
+  // Tomorrow's high/low for context
+  const tmwHigh = daily?.temperature_2m_max?.[1]?.toFixed(0) ?? '—';
+  const tmwLow  = daily?.temperature_2m_min?.[1]?.toFixed(0) ?? '—';
 
   card.innerHTML = `
     <div class="weather-header">
       <div class="weather-location">${loc.name}</div>
-      <span style="font-size:0.65rem;color:#565f89">Tomorrow ${tmwHigh} / ${tmwLow}</span>
+      <span style="font-size:0.65rem;color:#565f89">Tomorrow ${tmwHigh}\u00b0 / ${tmwLow}\u00b0</span>
     </div>
     <div class="weather-main">
-      <div class="weather-icon">${cond.emoji}</div>
+      <div class="weather-icon">${emoji}</div>
       <div class="weather-temp-group">
-        <span class="weather-temp">${Math.round(cur.temp)}\u00b0</span>
-        <span class="weather-condition">${cond.desc}</span>
-        <span class="weather-feels">Feels like ${Math.round(cur.feelsLike)}\u00b0F</span>
+        <span class="weather-temp">${Math.round(cur.temperature_2m)}\u00b0</span>
+        <span class="weather-condition">${desc}</span>
+        <span class="weather-feels">Feels like ${Math.round(cur.apparent_temperature)}\u00b0F</span>
       </div>
     </div>
     <div class="weather-details">
       <div class="w-detail">
-        <span class="w-detail-val">${cur.windSpeed.toFixed(0)} mph</span>
+        <span class="w-detail-val">${cur.wind_speed_10m.toFixed(0)} mph</span>
         <span class="w-detail-lbl">Wind</span>
       </div>
       <div class="w-detail">
-        <span class="w-detail-val">${cur.gust.toFixed(0)} mph</span>
-        <span class="w-detail-lbl">Gust</span>
-      </div>
-      <div class="w-detail">
-        <span class="w-detail-val">${cur.humidity.toFixed(0)}%</span>
+        <span class="w-detail-val">${cur.relative_humidity_2m}%</span>
         <span class="w-detail-lbl">Humidity</span>
       </div>
       <div class="w-detail">
-        <span class="w-detail-val">${cur.precip3h.toFixed(2)}"</span>
-        <span class="w-detail-lbl">Precip (3h)</span>
+        <span class="w-detail-val">${cur.precipitation.toFixed(2)}"</span>
+        <span class="w-detail-lbl">Precip (1h)</span>
       </div>
     </div>
     <div class="weather-chart-wrap">
-      <div class="weather-chart-label">7-Day &mdash; High/Low \u00b0F &amp; Precip (in)</div>
+      <div class="weather-chart-label">7-Day &mdash; High/Low \u00b0F &amp; Precip Probability</div>
       <canvas id="${canvasId}"></canvas>
     </div>`;
 
@@ -1183,14 +1091,14 @@ async function refresh() {
       renderStationCard(station, state.stationData[station.id]);
     });
 
-    // All weather fetches in parallel (Windy Point Forecast)
+    // All weather fetches in parallel
     const weatherJobs = WEATHER_LOCATIONS.map(async loc => {
       try {
-        const d = await fetchWindy(loc.lat, loc.lng);
+        const d = await fetchWeather(loc.lat, loc.lng);
         state.weatherData[loc.name] = d;
         renderWeatherCard(loc, d);
       } catch (err) {
-        console.warn(`[Windy ${loc.name}]`, err.message);
+        console.warn(`[Weather ${loc.name}]`, err.message);
         renderWeatherCard(loc, null);
       }
     });
